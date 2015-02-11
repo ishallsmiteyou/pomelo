@@ -27,3 +27,12 @@
 *.i*86
 *.x86_64
 *.hex
+*.bin
+
+# build / bin directories
+pkg/*
+bin/*
+
+# Some hidden files
+*.swp
+*.*~
