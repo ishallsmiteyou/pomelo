@@ -83,6 +83,8 @@ static void write_200(FILE* f) {
 	write_cr_lf(f);
 	fputs("Connection: close", f);
 	write_cr_lf(f);
+	fprintf(f, "Cache-Control: max-age=%d", 60 * 5); // Cache for 5 minutes.
+	write_cr_lf(f);
 	write_cr_lf(f);
 }
 
@@ -152,6 +154,7 @@ typedef struct Worker {
 	size_t line_length;
 
 	char* req_path;			
+	char* req_line;
 } Worker;
 
 // Add cleanup work if needed.
@@ -234,11 +237,11 @@ static int read_request(Worker* w) {
 		return -1;
 	}
 	size_t n;
+	w->req_line = calloc(1, i + 1);
+	memcpy(w->req_line, w->lineBuffer, i);
+
 	char* start_path = get_start_path(w->lineBuffer, (size_t)i, &n);
 	w->req_path = make_full_path(start_path, n);
-
-	fwrite(w->lineBuffer, 1, i, stdout);
-	fputc('\n', stdout);
 
 	while((i = read_line(w)) >= 0) {
 		if (i == 0) {
@@ -253,21 +256,31 @@ static int read_request(Worker* w) {
 	}
 }
 
+#include <time.h>
+
 // Reads http request, parses it and handles the request.
 static void read_parse_handle(Worker* w) {
+	clock_t start = clock();
+	clock_t diff;
+
 	int r = read_request(w);
 	if (r == 0) {
 		r = write_file(w->sfile, &(w->req_path));
 		if (r != 0) {
-			printf("Not Found\n");
 			write_404(w->sfile);
 		} else {
-			printf("OK\n");
 		}
 		free(w->req_path);
 	} else {
-		printf("Not Found\n");
+		// bad request.
 		write_404(w->sfile);
+		w->req_line = NULL;
+	}
+	diff = clock() - start;
+	float sec = ((float)diff * 1000) / CLOCKS_PER_SEC;
+	if (w->req_line != NULL) {
+		printf("%9.4f ms\t%s\n", sec, w->req_line);
+		free(w->req_line);
 	}
 	return;
 }
