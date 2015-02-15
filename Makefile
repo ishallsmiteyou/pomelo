@@ -5,13 +5,11 @@ opt := -Os
 
 cc := $(cc) $(opt) $(flags)
 
-pomelo_src := pomelo
-
 .PHONY: build
 build: dir bin/pomelo
 
 
-bin/pomelo: src/main.c src/pomelo.c
+bin/pomelo: src/main.c src/pomelo.c src/http.c
 	$(cc) $^ -o $@ $(link_flags)
 
 .PHONY: dir

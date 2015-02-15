@@ -1,4 +1,5 @@
 #include "pomelo.h"
+#include "http.h"
 
 #include <sys/types.h> 
 #include <sys/socket.h>
@@ -8,6 +9,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <pthread.h>
 #include <sys/stat.h>
@@ -17,8 +19,24 @@
  *
  */
 
-#define CR 0x0D
-#define LF 0x0A
+const char coloredLogFOK[] = 	"\x1B[34m%8.3f\x1B[0m %s\t%s\n";
+const char coloredLogFFAIL[] = 	"\x1B[31m%8.3f\x1B[0m %s\t%s\n";
+const char logF[] = 	   		"%8.3f %s\t%s\n";
+
+void httplog(FILE* out, int isOK, float msec, const char* file) {
+	const char* format = logF;
+	if (out == stdout) {
+		format = isOK ? coloredLogFOK : coloredLogFFAIL;
+	}
+	int secFlag = msec > 1000;
+	if (secFlag) {
+		fprintf(out, format, msec * 1000, " s", file);
+	} else {
+		fprintf(out, format, msec, "ms", file);
+	}
+}
+
+#define SAFE_FREE(ptr) { if ((ptr) != NULL) {free(ptr); ptr = NULL;} }
 
 static char* servingDir;
 static size_t servingDir_len;
@@ -35,97 +53,34 @@ static int is_dir(FILE* f) {
 static void add_index_html(char** sPtr) {
 	size_t n = strlen(*sPtr);
 	size_t new_size = n + 10;  // len of index.html
-	int add_slash = 0;
-	if ((*sPtr)[n-1] != '/') {
-		new_size += 1;
-		add_slash = 1;
-	}
+
 	*sPtr = realloc(*sPtr, new_size + 1);
-	if (add_slash) {
-		(*sPtr)[n] = '/';
-		n++;
-	}
+
 	memcpy((*sPtr) + n, "index.html", 10);
 	(*sPtr)[n + 10] = '\0';
 }
 
+static FILE* open_not_dir(const char* filename) {
+	FILE* f = fopen(filename, "r");
+	if (f == NULL) {
+		return NULL;
+	} else {
+		if (is_dir(f)) {
+			fclose(f);
+			return NULL;
+		}
+	}
+	return f;
+}
+
 // Add serving directory to the requested path.
-static char* make_full_path(char* location, size_t n) {
+static char* make_full_path(char* location) {
+	size_t n = strlen(location);
 	size_t final_len = servingDir_len + n;
 	char* buffer = calloc(1, final_len + 1);
 	memcpy(buffer, servingDir, servingDir_len);
 	memcpy(buffer + servingDir_len, location, n);
 	return buffer;
-}
-
-// Write <CR><LF> to file
-static void write_cr_lf(FILE* f) {
-	fputc(CR, f);
-	fputc(LF, f);
-}
-
-// Write 404 NOT FOUND Response to file.
-static void write_404(FILE* f) {
-	fputs("HTTP/1.1 ", f);
-	fputs("404 Not Found", f);
-	write_cr_lf(f);
-	fputs("Connection: close", f);
-	write_cr_lf(f);
-	write_cr_lf(f);
-	fputs("Not Found", f);
-	write_cr_lf(f);
-}
-
-// Write 200 OK header to file
-static void write_200(FILE* f) {
-	fputs("HTTP/1.1 ", f);
-	fputs("200 OK", f);
-	write_cr_lf(f);
-	fputs("Connection: close", f);
-	write_cr_lf(f);
-	fprintf(f, "Cache-Control: max-age=%d", 60 * 5); // Cache for 5 minutes.
-	write_cr_lf(f);
-	write_cr_lf(f);
-}
-
-// Write file as a responses body
-static void send_file(FILE* socketFile, FILE* f) {
-	size_t size = 128;
-	char buffer[size];
-	while (! feof(f)) {
-		size_t n = fread(buffer, 1, size, f);
-		fwrite(buffer, 1, n, socketFile);
-	}
-}
-
-// Check if file exsists, add index.html if it's a directory
-// and try to serve it.
-// Writes 200 + body if file is found (returns 0),
-// otherwise returns -1 without writing anything.
-static int write_file(FILE* f, char** namePtr) {
-	FILE* in = fopen(*namePtr, "r");
-	if (in == NULL) {
-		return -1;
-	}
-	if (is_dir(in)) {
-		fclose(in);
-		add_index_html(namePtr);
-		in = fopen(*namePtr, "r");
-		if (in == NULL) {
-			return -1;
-		}
-		if (is_dir(in)) {
-			fclose(in);
-			return -1;
-		}
-	}
-	if (in == NULL) {
-		return -1;
-	}
-	write_200(f);
-	send_file(f, in);
-	fclose(in);
-	return 0;
 }
 
 // Some typedefs to help out in Linux socket calls.
@@ -153,13 +108,27 @@ typedef struct Worker {
 	size_t line_buff_size;
 	size_t line_length;
 
-	char* req_path;			
 	char* req_line;
+	char* req_method;
+	char* req_path;
+	char* req_full_path;
+	char* req_version;
 } Worker;
 
-// Add cleanup work if needed.
-static void reset_worker(Worker* w) {
-	(void)(w);
+static void prep_worker(Worker* w) {
+	w->req_line = NULL;
+	w->req_method = NULL;
+	w->req_path = NULL;
+	w->req_full_path = NULL;
+	w->req_version = NULL;
+}
+
+static void clean_worker(Worker* w) {
+	SAFE_FREE(w->req_line);
+	SAFE_FREE(w->req_method);
+	SAFE_FREE(w->req_path);
+	SAFE_FREE(w->req_full_path);
+	SAFE_FREE(w->req_version);
 }
 
 // Append char c into Workers line buffer + expand it if needed.
@@ -170,29 +139,6 @@ static void add_char_to_line(Worker* w, char c) {
 	}
 	w->lineBuffer[w->line_length] = c;
 	w->line_length++;
-}
-
-// Find the start and length of path in "GET /index.html HTTP/1.1" string
-static char* get_start_path(char* line, size_t max_len, size_t* n) {
-	*n = 0;
-	size_t start = 0;
-	while ((line[start] != ' ') && (start <= max_len)) {
-		start++;
-	}
-	if (start >= max_len) {
-		return NULL;
-	}
-	char* p = line + start + 1; // First char after space
-	max_len = max_len - (start + 1);
-
-	while ((p[*n] != ' ') && (*n <= max_len)) {
-		(*n)++;
-	}
-	if (*n >= max_len) {
-		return NULL;
-	}
-	// p[*n] is a space => n - lengh of the path.
-	return p;
 }
 
 // return values:
@@ -236,12 +182,25 @@ static int read_request(Worker* w) {
 	if (i <= 0) {
 		return -1;
 	}
-	size_t n;
+
 	w->req_line = calloc(1, i + 1);
 	memcpy(w->req_line, w->lineBuffer, i);
 
-	char* start_path = get_start_path(w->lineBuffer, (size_t)i, &n);
-	w->req_path = make_full_path(start_path, n);
+	int n = fill_http_method(w->req_line, i, &w->req_method);
+	if (n < 0) {
+		return -1;
+	}
+	char* workingLine = w->req_line + n + 1;
+
+	int nFullPath = fill_http_full_path(workingLine, i - n - 1, &w->req_full_path);
+	if (nFullPath < 0) {
+		return -1;
+	}
+
+	int nVersion = fill_http_version(workingLine, i - n - 1 - nFullPath - 1, &w->req_version);
+	if (nVersion < 0) {
+		return -1;
+	}
 
 	while((i = read_line(w)) >= 0) {
 		if (i == 0) {
@@ -251,36 +210,44 @@ static int read_request(Worker* w) {
 	if (i == -1) {
 		return 0;
 	} else {
-		free(w->req_path);
 		return -1;
 	}
 }
 
-#include <time.h>
 
 // Reads http request, parses it and handles the request.
 static void read_parse_handle(Worker* w) {
 	clock_t start = clock();
 	clock_t diff;
 
+	int status = 0;
+
 	int r = read_request(w);
-	if (r == 0) {
-		r = write_file(w->sfile, &(w->req_path));
-		if (r != 0) {
-			write_404(w->sfile);
-		} else {
-		}
-		free(w->req_path);
+	if (r != 0) {
+		resp_bad_req(w->sfile);
 	} else {
-		// bad request.
-		write_404(w->sfile);
-		w->req_line = NULL;
+		extract_http_path(w->req_full_path, &w->req_path);
+		char* absolutePath = make_full_path(w->req_path);
+		FILE* f = open_not_dir(absolutePath);
+		if (f == NULL) {
+			add_index_html(&absolutePath);
+			f = open_not_dir(absolutePath);
+		}
+
+		if (f == NULL) {
+			resp_not_found(w->sfile);
+		} else {
+			resp_serve_file(w->sfile, f);
+			status = 1;
+		}
+
+		free(absolutePath);
 	}
+
 	diff = clock() - start;
-	float sec = ((float)diff * 1000) / CLOCKS_PER_SEC;
+	float msec = ((float)diff * 1000) / CLOCKS_PER_SEC;
 	if (w->req_line != NULL) {
-		printf("%9.4f ms\t%s\n", sec, w->req_line);
-		free(w->req_line);
+		httplog(stdout, status, msec, w->req_path);
 	}
 	return;
 }
@@ -337,12 +304,14 @@ static Worker* get_ready_worker(worker_pool* pool) {
 // Worker has it's socket file descriptor set.
 static void* worker_thread(void* arg) {
 	Worker* w = (Worker*)arg;
-	reset_worker(w);
+	prep_worker(w);
 
 	read_parse_handle(w);
 
 	fclose(w->sfile);
 	w->sfile = NULL;
+
+	clean_worker(w);
 
 	w->status = ready;
 	pthread_exit(NULL);
