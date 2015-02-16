@@ -14,21 +14,16 @@
 #include <pthread.h>
 #include <sys/stat.h>
 
-/*
- * TCP SOCKET LAYER
- *
- */
-
-const char coloredLogFOK[] = 	"\x1B[34m%8.3f\x1B[0m %s\t%s\n";
-const char coloredLogFFAIL[] = 	"\x1B[31m%8.3f\x1B[0m %s\t%s\n";
-const char logF[] = 	   		"%8.3f %s\t%s\n";
+const char coloredLogFOK[] = 	"%7.3f %s \x1B[32m%s\x1B[0m\n";
+const char coloredLogFFAIL[] = 	"%7.3f %s \x1B[31m%s\x1B[0m\n";
+const char logF[] = 	   		"%7.3f %s %s\n";
 
 void httplog(FILE* out, int isOK, float msec, const char* file) {
 	const char* format = logF;
 	if (out == stdout) {
 		format = isOK ? coloredLogFOK : coloredLogFFAIL;
 	}
-	int secFlag = msec > 1000;
+	int secFlag = msec >= 1000;
 	if (secFlag) {
 		fprintf(out, format, msec * 1000, " s", file);
 	} else {
@@ -92,7 +87,8 @@ static const size_t DEFAULT_LINE_LEN = 64;
 // Possible worker status values.
 typedef enum worker_status_t {
 	ready,		// Can be used
-	working 	// Is handling a connection. Can't accept new connection.
+	working, 	// Is handling a connection. Can't accept new connection.
+	reserved
 } worker_status_t;
 
 // HTTP server worker.
@@ -239,6 +235,7 @@ static void read_parse_handle(Worker* w) {
 		} else {
 			resp_serve_file(w->sfile, f);
 			status = 1;
+			fclose(f);
 		}
 
 		free(absolutePath);
@@ -272,6 +269,7 @@ worker_pool* new_worker_pool(size_t n) {
 	p->workers = malloc(sizeof(Worker) * n);
 	for (size_t i = 0; i < n; i++) {
 		init_worker(&(p->workers[i]));
+		prep_worker(&(p->workers[i]));
 	}
 	p->nr = n;
 	return p;
@@ -280,7 +278,10 @@ worker_pool* new_worker_pool(size_t n) {
 static void delete_worker_pool(worker_pool* p) {
 	for (size_t i = 0; i < p->nr; i++) {
 		free(p->workers[i].lineBuffer);
-		pthread_join(p->workers[i].thread_info, NULL);
+		clean_worker(&(p->workers[i]));
+		if (p->workers[i].status == working) {
+			pthread_join(p->workers[i].thread_info, NULL);
+		}
 	}
 	free(p->workers);
 	free(p);
@@ -296,7 +297,7 @@ static Worker* get_ready_worker(worker_pool* pool) {
 		i = (i + 1) % n;
 		current = &(array[i]);
 	}
-	current->status = working;
+	current->status = reserved;
 	return current;
 }
 
@@ -304,6 +305,7 @@ static Worker* get_ready_worker(worker_pool* pool) {
 // Worker has it's socket file descriptor set.
 static void* worker_thread(void* arg) {
 	Worker* w = (Worker*)arg;
+	w->status = working;
 	prep_worker(w);
 
 	read_parse_handle(w);
@@ -314,6 +316,7 @@ static void* worker_thread(void* arg) {
 	clean_worker(w);
 
 	w->status = ready;
+	pthread_detach(w->thread_info);
 	pthread_exit(NULL);
 }
 
@@ -380,7 +383,6 @@ int run_pomelo(int port, const char* dir) {
 
 		pthread_create(&(w->thread_info), NULL, worker_thread, (void*)w);
 	}
-
 	stop_pomelo();
 
 	return 0;
