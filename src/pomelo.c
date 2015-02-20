@@ -20,7 +20,7 @@ const char logF[] = 	   		"%7.3f %s %s\n";
 
 void httplog(FILE* out, int isOK, float msec, const char* file) {
 	const char* format = logF;
-	if (out == stdout) {
+	if ((out == stdout) || (out == stderr)) {
 		format = isOK ? coloredLogFOK : coloredLogFFAIL;
 	}
 	int secFlag = msec >= 1000;
@@ -244,7 +244,7 @@ static void read_parse_handle(Worker* w) {
 	diff = clock() - start;
 	float msec = ((float)diff * 1000) / CLOCKS_PER_SEC;
 	if (w->req_line != NULL) {
-		httplog(stdout, status, msec, w->req_path);
+		httplog(stderr, status, msec, w->req_path);
 	}
 	return;
 }
