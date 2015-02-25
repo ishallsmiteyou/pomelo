@@ -12,6 +12,8 @@ void sig_handler(int n) {
 
 int main(int argc, char** argv) {
 	int port = 8000;
+	int nrWorkers = 4;
+
 	char* dir;
 	if (argc < 2) {
 		dir = "/var/www";
@@ -20,7 +22,7 @@ int main(int argc, char** argv) {
 	}
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
-	int r = run_pomelo(port, dir);
+	int r = run_pomelo(port, dir, nrWorkers, stderr);
 	if (r != 0) {
 		printf("FAILED WITH CODE %d\n", r);
 		return 1;

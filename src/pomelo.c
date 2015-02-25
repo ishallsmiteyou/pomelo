@@ -18,16 +18,21 @@ const char coloredLogFOK[] = 	"%7.3f %s \x1B[32m%s\x1B[0m\n";
 const char coloredLogFFAIL[] = 	"%7.3f %s \x1B[31m%s\x1B[0m\n";
 const char logF[] = 	   		"%7.3f %s %s\n";
 
-void httplog(FILE* out, int isOK, float msec, const char* file) {
+FILE* logFile;
+
+void httplog(int isOK, float msec, const char* file) {
+	if (logFile == NULL) {
+		return;
+	}
 	const char* format = logF;
-	if ((out == stdout) || (out == stderr)) {
+	if ((logFile == stdout) || (logFile == stderr)) {
 		format = isOK ? coloredLogFOK : coloredLogFFAIL;
 	}
 	int secFlag = msec >= 1000;
 	if (secFlag) {
-		fprintf(out, format, msec * 1000, " s", file);
+		fprintf(logFile, format, msec * 1000, " s", file);
 	} else {
-		fprintf(out, format, msec, "ms", file);
+		fprintf(logFile, format, msec, "ms", file);
 	}
 }
 
@@ -244,9 +249,28 @@ static void read_parse_handle(Worker* w) {
 	diff = clock() - start;
 	float msec = ((float)diff * 1000) / CLOCKS_PER_SEC;
 	if (w->req_line != NULL) {
-		httplog(stderr, status, msec, w->req_path);
+		httplog(status, msec, w->req_path);
 	}
 	return;
+}
+
+// Thread function that pthread_create() calls.
+// Worker has it's socket file descriptor set.
+static void* worker_thread(void* arg) {
+	Worker* w = (Worker*)arg;
+	w->status = working;
+	prep_worker(w);
+
+	read_parse_handle(w);
+
+	fclose(w->sfile);
+	w->sfile = NULL;
+
+	clean_worker(w);
+
+	w->status = ready;
+	pthread_detach(w->thread_info);
+	pthread_exit(NULL);
 }
 
 // Prepares a new worker to accept connections.
@@ -301,25 +325,6 @@ static Worker* get_ready_worker(worker_pool* pool) {
 	return current;
 }
 
-// Thread function that pthread_create() calls.
-// Worker has it's socket file descriptor set.
-static void* worker_thread(void* arg) {
-	Worker* w = (Worker*)arg;
-	w->status = working;
-	prep_worker(w);
-
-	read_parse_handle(w);
-
-	fclose(w->sfile);
-	w->sfile = NULL;
-
-	clean_worker(w);
-
-	w->status = ready;
-	pthread_detach(w->thread_info);
-	pthread_exit(NULL);
-}
-
 static int get_bind_listener(int port) {
 	int listener = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -347,8 +352,12 @@ static int get_bind_listener(int port) {
 static int* globalListener;
 worker_pool* globalPool;
 
-int run_pomelo(int port, const char* dir) {
-	size_t n_workers = 3;
+int run_pomelo(int port, const char* dir, int nrWorkers, FILE* log) {
+	if (nrWorkers <= 0) {
+		return -666;
+	}
+	size_t n_workers = (size_t)nrWorkers;
+	logFile = log;
 
 	// Copy the serving directory.
 	// If it ends in '/', we don't copy it. (Easyer concatenation)
@@ -368,7 +377,7 @@ int run_pomelo(int port, const char* dir) {
 	}
 
 	listen(listener, 100);
-	printf("Running on port %u\n", port);
+	printf("%zu Workers running on port %u, serving %s\n", n_workers, port, dir);
 
 	socklen_t clilen = sizeof(sockaddr);
 
@@ -400,5 +409,6 @@ void stop_pomelo() {
 	if (servingDir != NULL) {
 		free(servingDir);
 	}
+	printf("\rStoping\n");
 	exit(1);
 }
